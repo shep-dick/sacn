@@ -115,6 +115,13 @@ const PRE_SUPPRESSION_PACKETS: u8 = 3;
 /// (E1.31 §6.2.6).
 const TERMINATION_PACKETS: u8 = 3;
 
+/// The spacing held between a universe's level packet and its
+/// per-address-priority packet, so the two never get surfaced in the same
+/// instant. See the comment in `poll_universe()`.
+const PAP_SPACING: Duration = TICK_INTERVAL
+    .checked_div(2)
+    .expect("the tick interval is divisible");
+
 // --- Configuration -----------------------------------------------------------
 
 /// Configuration for a [`Source`].
@@ -334,6 +341,7 @@ pub struct TxUniverseState {
     pap_next_send: Instant,
     level_last_send: Option<Instant>,
     pap_last_send: Option<Instant>,
+    pap_held: bool,
 
     terminating: bool,
     term_count: u8,
@@ -357,6 +365,7 @@ impl TxUniverseState {
             pap_next_send: Instant::EPOCH,
             level_last_send: None,
             pap_last_send: None,
+            pap_held: false,
             terminating: false,
             term_count: 0,
             term_next_send: Instant::EPOCH,
@@ -1068,6 +1077,7 @@ impl<S: SourceStorage> SourceCore<S> {
         // Dropping the PAP data stops its packets from being queued; receivers
         // see the per-address priority time out. Levels are unaffected.
         state.pap.clear();
+        state.pap_held = false;
     }
 
     /// Changes a universe's priority.
@@ -1606,9 +1616,11 @@ fn poll_universe(
     }
 
     let mut queued = false;
+    let mut level_sent = false;
     if state.has_levels() && now >= state.level_next_send {
         queue_level(state, false, pending);
         queued = true;
+        level_sent = true;
         state.level_last_send = Some(now);
         state.level_pre_suppression =
             (state.level_pre_suppression + 1).min(PRE_SUPPRESSION_PACKETS);
@@ -1621,16 +1633,38 @@ fn poll_universe(
     }
 
     if state.has_pap() && now >= state.pap_next_send {
-        queue_pap(state, pending);
-        queued = true;
-        state.pap_last_send = Some(now);
-        state.pap_pre_suppression = (state.pap_pre_suppression + 1).min(PRE_SUPPRESSION_PACKETS);
-        let interval = if state.pap_pre_suppression < PRE_SUPPRESSION_PACKETS {
-            TICK_INTERVAL
+        let spacing = if state.sync_universe == 0 {
+            PAP_SPACING
         } else {
-            config.pap_keep_alive
+            PAP_SPACING.min(config.sync_delay / 2)
         };
-        state.pap_next_send = now.saturating_add(interval);
+
+        if level_sent && !state.pap_held && !spacing.is_zero() {
+            // Avoid sending levels and PAP in the same instant. Artificially
+            // spacing them out across the tick interval dramatically reduces
+            // the likelihood of UDP reordering and thus sequence number
+            // problems on the receiving side.
+            //
+            // If the universe is synchronized, the spacing must be the middle
+            // of the synchronization window instead of the overall
+            // TICK_INTERVAL; this is generally a smaller margin of error but
+            // necessary for sync to work properly.
+            state.pap_held = true;
+            state.pap_next_send = now.saturating_add(spacing);
+        } else {
+            state.pap_held = false;
+            queue_pap(state, pending);
+            queued = true;
+            state.pap_last_send = Some(now);
+            state.pap_pre_suppression =
+                (state.pap_pre_suppression + 1).min(PRE_SUPPRESSION_PACKETS);
+            let interval = if state.pap_pre_suppression < PRE_SUPPRESSION_PACKETS {
+                TICK_INTERVAL
+            } else {
+                config.pap_keep_alive
+            };
+            state.pap_next_send = now.saturating_add(interval);
+        }
     }
 
     queued

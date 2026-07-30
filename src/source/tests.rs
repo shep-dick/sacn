@@ -141,6 +141,20 @@ fn data_packets(txs: &[OwnedTx]) -> Vec<OwnedData> {
     out
 }
 
+/// The number of level and of per-address-priority data packets among `txs`.
+fn level_and_pap_counts(txs: &[OwnedTx]) -> (usize, usize) {
+    let packets = data_packets(txs);
+    let levels = packets
+        .iter()
+        .filter(|p| p.start_code == DMX_NULL_START_CODE)
+        .count();
+    let pap = packets
+        .iter()
+        .filter(|p| p.start_code == PAP_START_CODE)
+        .count();
+    (levels, pap)
+}
+
 #[test]
 fn no_universes_emits_nothing() {
     let mut source = test_source();
@@ -322,23 +336,151 @@ fn pap_sends_as_expected() {
         .expect("should have capacity");
     source.update_levels_and_pap(univ(1), &[100, 100, 100], &[200, 0, 50]);
 
-    let (_deadline, txs) = poll_at(&mut source, at(0));
-    let packets = data_packets(&txs);
-    let levels: Vec<_> = packets
-        .iter()
-        .filter(|p| p.start_code == DMX_NULL_START_CODE)
-        .collect();
-    let pap: Vec<_> = packets
-        .iter()
-        .filter(|p| p.start_code == PAP_START_CODE)
-        .collect();
+    // Levels and PAPs should not share a poll instant but be separated by
+    // roughly half a tick interval.
+    let (deadline, txs) = poll_at(&mut source, at(0));
+    let levels = data_packets(&txs);
     assert_eq!(levels.len(), 1);
-    assert_eq!(pap.len(), 1);
+    assert_eq!(levels[0].start_code, DMX_NULL_START_CODE);
     assert_eq!(levels[0].values, &[100, 100, 100]);
-    assert_eq!(pap[0].values, &[200, 0, 50]);
-    // PAP is sent after levels and carries the next sequence number.
     assert_eq!(levels[0].sequence, 0);
+    assert!(deadline.unwrap().since_epoch().as_millis() < 22);
+
+    let (_deadline, txs) = poll_at(&mut source, deadline.unwrap());
+    let pap = data_packets(&txs);
+    assert_eq!(pap.len(), 1);
+    assert_eq!(pap[0].start_code, PAP_START_CODE);
+    assert_eq!(pap[0].values, &[200, 0, 50]);
     assert_eq!(pap[0].sequence, 1);
+}
+
+#[test]
+fn pap_is_never_sent_back_to_back_with_levels() {
+    let mut source = test_source();
+    source
+        .add_universe(UniverseConfig::new(univ(1)))
+        .expect("should have capacity");
+    source.update_levels_and_pap(univ(1), &[100; 16], &[200; 16]);
+
+    // Drive the source off its own deadlines for a few keep-alive cycles: no
+    // poll may ever produce a level and a PAP packet together.
+    let mut now = Instant::EPOCH;
+    for _ in 0..64 {
+        let (deadline, txs) = poll_at(&mut source, now);
+        let (levels, pap) = level_and_pap_counts(&txs);
+        assert!(
+            levels == 0 || pap == 0,
+            "levels and PAP sent back to back at {}ms",
+            now.since_epoch().as_millis()
+        );
+        // should always have a keep-alive to send
+        let deadline = deadline.unwrap();
+        now = deadline;
+    }
+}
+
+#[test]
+fn pap_stays_spaced_when_data_changes_every_frame() {
+    let mut source = test_source();
+    source
+        .add_universe(UniverseConfig::new(univ(1)))
+        .expect("should have capacity");
+
+    // A caller honoring the deadline, updating both levels and PAP at the top of
+    // every 22ms frame.
+    let mut now = 0u64;
+    let mut frame = 0u64;
+    for _ in 0..32 {
+        if now >= frame {
+            source.update_levels_and_pap(univ(1), &[now as u8; 16], &[now as u8 + 1; 16]);
+            frame += 22;
+        }
+        let (deadline, txs) = poll_at(&mut source, at(now));
+        let (levels, pap) = level_and_pap_counts(&txs);
+        assert!(
+            levels == 0 || pap == 0,
+            "levels and PAP sent back to back at {now}ms",
+        );
+        let next = deadline
+            .unwrap()
+            .saturating_duration_since(Instant::EPOCH)
+            .as_millis() as u64;
+        now = next.min(frame);
+    }
+}
+
+#[test]
+fn neither_start_code_starves_when_the_deadline_is_ignored() {
+    const FRAMES: u64 = 16;
+
+    let mut source = test_source();
+    source
+        .add_universe(UniverseConfig::new(univ(1)))
+        .expect("should have capacity");
+
+    // This is a somewhat pathological case where a caller is ignoring the poll
+    // deadline and polling only every 22ms, while also updating the data
+    // constantly. It is not possible to space PAP from levels in this case, but
+    // neither should starve.
+    let mut levels_sent = 0;
+    let mut pap_sent = 0;
+    for i in 0..FRAMES {
+        source.update_levels_and_pap(univ(1), &[i as u8; 16], &[i as u8 + 1; 16]);
+        let (_deadline, txs) = poll_at(&mut source, at(i * 22));
+        let (levels, pap) = level_and_pap_counts(&txs);
+        levels_sent += levels as u64;
+        pap_sent += pap as u64;
+    }
+    assert_eq!(levels_sent, FRAMES, "levels starved");
+    // PAP is always artificially delayed, so we expect the number of PAP
+    // packets sent to be lower in this case; an arbitrary slack multiplier of 4
+    // is chosen.
+    assert!(
+        pap_sent * 4 >= FRAMES,
+        "PAP starved: only {pap_sent} packets over {FRAMES} frames",
+    );
+}
+
+#[test]
+fn pap_is_not_starved_by_a_coarse_poller() {
+    let mut source = test_source();
+    source
+        .add_universe(UniverseConfig::new(univ(1)))
+        .expect("should have capacity");
+
+    // A caller polling far more coarsely than the spacing interval, with levels
+    // changing every poll, must still get PAP out.
+    let mut pap_sent = 0;
+    for i in 0..20u64 {
+        source.update_levels_and_pap(univ(1), &[i as u8; 16], &[i as u8 + 1; 16]);
+        let (_deadline, txs) = poll_at(&mut source, at(i * 50));
+        pap_sent += level_and_pap_counts(&txs).1;
+    }
+    assert!(pap_sent >= 9, "PAP starved: only {pap_sent} packets sent");
+}
+
+#[test]
+fn removing_pap_resets_pap_spacing() {
+    let mut source = test_source();
+    source
+        .add_universe(UniverseConfig::new(univ(1)))
+        .expect("should have capacity");
+    source.update_levels_and_pap(univ(1), &[100; 16], &[200; 16]);
+
+    // Levels go out and the priorities are held.
+    let (_deadline, txs) = poll_at(&mut source, at(0));
+    assert_eq!(level_and_pap_counts(&txs), (1, 0));
+
+    // Removing PAP should reset the held PAP update, and adding new data should
+    // then reset it to come half a tick interval after the levels again.
+    source.remove_pap(univ(1));
+    source.update_levels_and_pap(univ(1), &[110; 16], &[210; 16]);
+    let (deadline, txs) = poll_at(&mut source, at(22));
+    assert_eq!(level_and_pap_counts(&txs), (1, 0));
+    assert_eq!(deadline, Some(at(33)));
+
+    let (_deadline, txs) = poll_at(&mut source, at(33));
+    assert_eq!(level_and_pap_counts(&txs), (0, 1));
 }
 
 #[test]
@@ -947,6 +1089,101 @@ fn sync_delay_defers_the_sync_to_a_later_poll() {
     // At the deadline the sync fires.
     let (_, txs) = poll_at(&mut source, at(5));
     assert_eq!(sync_packets(&txs), alloc::vec![(100, 0)]);
+}
+
+#[test]
+fn synchronized_pap_is_spaced_inside_the_sync_window() {
+    let mut source = Source::new(
+        SourceConfig::new(Cid::from_bytes([1; 16]), "test")
+            .with_sync_delay(Duration::from_millis(10)),
+    );
+    source
+        .add_universe(
+            UniverseConfig::new(univ(1)).synchronized_on(univ(100), OnSyncLoss::HoldLastLook),
+        )
+        .expect("should have capacity");
+    source.update_levels_and_pap(univ(1), &[1, 2, 3], &[10, 20, 30]);
+
+    // PAP should be sent at the midpoint of the sync delay.
+    for frame in [0u64, 22, 44] {
+        let (deadline, txs) = poll_at(&mut source, at(frame));
+        assert_eq!(level_and_pap_counts(&txs), (1, 0), "frame at {frame}ms");
+        assert!(sync_packets(&txs).is_empty());
+        assert_eq!(deadline, Some(at(frame + 5)));
+
+        let (deadline, txs) = poll_at(&mut source, at(frame + 5));
+        assert_eq!(level_and_pap_counts(&txs), (0, 1), "frame at {frame}ms");
+        assert!(sync_packets(&txs).is_empty());
+        assert_eq!(deadline, Some(at(frame + 10)));
+
+        let (_deadline, txs) = poll_at(&mut source, at(frame + 10));
+        assert_eq!(level_and_pap_counts(&txs), (0, 0), "frame at {frame}ms");
+        assert_eq!(sync_packets(&txs).len(), 1);
+    }
+}
+
+#[test]
+fn synchronized_pap_is_unspaced_without_a_sync_window() {
+    // When the sync delay is 0 (as returned from `test_source`), there is no
+    // choice but to send DMX, PAP and sync in the same poll.
+    let mut source = test_source();
+    source
+        .add_universe(
+            UniverseConfig::new(univ(1)).synchronized_on(univ(100), OnSyncLoss::HoldLastLook),
+        )
+        .expect("should have capacity");
+    source.update_levels_and_pap(univ(1), &[1, 2, 3], &[10, 20, 30]);
+
+    let (_deadline, txs) = poll_at(&mut source, at(0));
+    assert_eq!(level_and_pap_counts(&txs), (1, 1));
+    assert_eq!(sync_packets(&txs), alloc::vec![(100, 0)]);
+
+    // Both data packets are queued ahead of the sync that releases them.
+    let sync_idx = txs
+        .iter()
+        .position(|t| matches!(t.route, Route::Sync(_)))
+        .unwrap();
+    let last_data = txs
+        .iter()
+        .rposition(|t| t.route == Route::Universe(univ(1)))
+        .unwrap();
+    assert!(sync_idx > last_data);
+}
+
+#[test]
+fn desynchronizing_before_the_pap_is_sent_costs_one_frame_of_spacing() {
+    let mut source = Source::new(
+        SourceConfig::new(Cid::from_bytes([1; 16]), "test")
+            .with_sync_delay(Duration::from_millis(10)),
+    );
+    source
+        .add_universe(
+            UniverseConfig::new(univ(1)).synchronized_on(univ(100), OnSyncLoss::HoldLastLook),
+        )
+        .expect("should have capacity");
+    source.update_levels_and_pap(univ(1), &[1, 2, 3], &[10, 20, 30]);
+
+    // Levels go out and the PAP packet is delayed to the midpoint of the sync
+    // window, where it is still waiting.
+    let (deadline, txs) = poll_at(&mut source, at(0));
+    assert_eq!(level_and_pap_counts(&txs), (1, 0));
+    assert_eq!(deadline, Some(at(5)));
+
+    // Synchronization is disabled. The PAP is still tracking that it is held
+    // and waiting to go out, so it is emitted on the next poll with the DMX
+    // data. We expect and accept one frame of DMX and PAP at the same instance
+    // in this edge case.
+    source.set_synchronization(univ(1), None);
+    let (_deadline, txs) = poll_at(&mut source, at(22));
+    assert_eq!(level_and_pap_counts(&txs), (1, 1));
+
+    // The levels/PAP spacing should automatically recover.
+    let (deadline, txs) = poll_at(&mut source, at(44));
+    assert_eq!(level_and_pap_counts(&txs), (1, 0));
+    assert_eq!(deadline, Some(at(55)));
+
+    let (_deadline, txs) = poll_at(&mut source, at(55));
+    assert_eq!(level_and_pap_counts(&txs), (0, 1));
 }
 
 #[test]
