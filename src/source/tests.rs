@@ -1301,3 +1301,30 @@ fn discovery_lists_sync_universes() {
         .collect();
     assert_eq!(listed, alloc::vec![1, 100]);
 }
+
+#[cfg(feature = "secure")]
+#[test]
+fn secured_source_emits_packets_that_open_to_the_plain_ones() {
+    use crate::secure::{SecureMode, SecurityKey, open};
+    let key = SecurityKey::new([9; 16]);
+
+    let mut plain = test_source();
+    let mut secured = test_source();
+    secured.set_security(Some((key.clone(), SecureMode::Encrypted)));
+    for source in [&mut plain, &mut secured] {
+        source.add_universe(UniverseConfig::new(univ(1))).unwrap();
+        source.update_levels(univ(1), &[1, 2, 3]);
+    }
+
+    let (_, plain_txs) = poll_at(&mut plain, at(0));
+    let (_, secured_txs) = poll_at(&mut secured, at(0));
+    assert!(!plain_txs.is_empty());
+    assert_eq!(plain_txs.len(), secured_txs.len());
+    for (plain_tx, secured_tx) in plain_txs.iter().zip(&secured_txs) {
+        assert_ne!(plain_tx.bytes, secured_tx.bytes);
+        let mut buf = secured_tx.bytes.clone();
+        let len = buf.len();
+        let n = open(&key, &mut buf, len).expect("opens");
+        assert_eq!(buf[..n], plain_tx.bytes[..]);
+    }
+}

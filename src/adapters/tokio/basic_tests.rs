@@ -181,3 +181,48 @@ async fn stop_listening_reports_whether_it_was_listening() {
     assert!(rx.stop_listening(universe).await.unwrap());
     assert!(!rx.stop_listening(universe).await.unwrap());
 }
+
+/// Seals a serialized packet with `key` in encrypted mode.
+#[cfg(feature = "secure")]
+fn seal(mut bytes: Vec<u8>, key: [u8; 16]) -> Vec<u8> {
+    use crate::secure::{Sealer, SecureMode, SecurityKey};
+    let len = bytes.len();
+    bytes.resize(MAX_PACKET_SIZE, 0);
+    let n = Sealer::new(SecurityKey::new(key), SecureMode::Encrypted).seal(&mut bytes, len);
+    bytes.truncate(n);
+    bytes
+}
+
+#[cfg(feature = "secure")]
+#[tokio::test]
+async fn secure_receiver_delivers_only_packets_sealed_with_its_key() {
+    let config = ReceiverConfig::new().with_sample_period(Duration::from_millis(300));
+    let mut rx = bind_loopback(config).await;
+    rx.set_security(Some(crate::secure::SecurityKey::new([1; 16])));
+    let universe = Universe::new(1).unwrap();
+    listen_without_network(&mut rx, universe);
+    let addr = rx.socket.local_addr().unwrap();
+    assert_eq!(
+        next_event(&mut rx).await,
+        BasicReceiverEvent::SamplingStarted { universe }
+    );
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // A plain packet and one sealed with the wrong key are both dropped...
+    for packet in [
+        data_packet(cid(1), 1, 0, &[1, 1, 1]),
+        seal(data_packet(cid(2), 1, 0, &[2, 2, 2]), [2; 16]),
+        // ...and only this one is delivered.
+        seal(data_packet(cid(3), 1, 0, &[10, 20, 30]), [1; 16]),
+    ] {
+        sender.send_to(&packet, addr).await.unwrap();
+    }
+
+    match next_event(&mut rx).await {
+        BasicReceiverEvent::UniverseData(data) => {
+            assert_eq!(data.source.cid, cid(3));
+            assert_eq!(data.values, [10, 20, 30]);
+        }
+        other => panic!("expected universe data, got {other:?}"),
+    }
+}

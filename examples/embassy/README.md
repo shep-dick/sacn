@@ -19,6 +19,17 @@ You will see logs in the `probe-rs` console via `defmt`. The device boots into a
 
 **Long-pressing** the user button B1 (hold for about a second) switches to **pattern mode**, where the device instead sources a set of animated patterns on universe 1 and shows the pattern's first three slots on the LEDs. A **short press** of B1 cycles through the patterns. Long-press again to return to mirror mode.
 
+### Secure sACN (experimental)
+
+Build and run with `--features secure` to enable the proof-of-concept packet security from `sacn::secure`. The device then encrypts everything it sources and accepts only secured packets, using the demo key in `src/main.rs`. To talk to it from a host, run the tokio examples from the repo root with the matching key:
+
+```
+cargo run --example source --features secure -- --key 000102030405060708090a0b0c0d0e0f --encrypt
+cargo run --example basic_receiver --features secure -- --key 000102030405060708090a0b0c0d0e0f
+```
+
+Standard sACN tools (sACNView, Wireshark) will not show levels from the device in this mode.
+
 If you're looking for a tool to verify the sACN output, [sACNView](https://sacnview.org) is the go-to choice.
 
 ## Seeing Flash/RAM usage

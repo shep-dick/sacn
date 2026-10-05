@@ -228,6 +228,16 @@ impl Source {
         self.core.set_name(name);
     }
 
+    /// Enables or disables experimental packet security. See
+    /// [`Source::set_security`](crate::source::Source::set_security).
+    #[cfg(feature = "secure")]
+    pub fn set_security(
+        &mut self,
+        security: Option<(crate::secure::SecurityKey, crate::secure::SecureMode)>,
+    ) {
+        self.core.set_security(security);
+    }
+
     /// Starts, changes, or stops synchronization for a universe at runtime. See
     /// [`Source::set_synchronization`](crate::source::Source::set_synchronization).
     pub fn set_synchronization(

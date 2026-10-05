@@ -16,6 +16,10 @@
 //!   freezes on the last synced frame ([`OnSyncLoss::HoldLastLook`]), `revert`
 //!   falls back to live output ([`OnSyncLoss::RevertToLive`]). Default `hold`.
 //!
+//! - `--key <32 hex digits>` - secure every packet with this AES-128 key (needs
+//!   `--features secure`). Packets are authenticated; add `--encrypt` to also
+//!   encrypt the DMX slots. See `sacn::secure`.
+//!
 //! For example, `cargo run --example source -- --universes 1,2,3 --sync 100`
 //! transmits a synchronized three-universe sweep, releasing all three with one
 //! sync packet on universe 100.
@@ -38,12 +42,16 @@ struct Args {
     universes: Vec<Universe>,
     sync: Option<Universe>,
     on_loss: OnSyncLoss,
+    key: Option<[u8; 16]>,
+    encrypt: bool,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
     let mut universes = Vec::new();
     let mut sync = None;
     let mut on_loss = OnSyncLoss::HoldLastLook;
+    let mut key = None;
+    let mut encrypt = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -72,8 +80,15 @@ fn parse_args() -> anyhow::Result<Args> {
                     other => anyhow::bail!("--on-loss must be `hold` or `revert`, got `{other}`"),
                 };
             }
+            "--key" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--key needs a value"))?;
+                key = Some(parse_key(&value)?);
+            }
+            "--encrypt" => encrypt = true,
             other => anyhow::bail!(
-                "unrecognized argument `{other}`; use --universes, --sync, or --on-loss"
+                "unrecognized argument `{other}`; use --universes, --sync, --on-loss, --key, or --encrypt"
             ),
         }
     }
@@ -81,11 +96,24 @@ fn parse_args() -> anyhow::Result<Args> {
     if universes.is_empty() {
         universes.push(Universe::new(1)?);
     }
+    anyhow::ensure!(!encrypt || key.is_some(), "--encrypt needs --key");
     Ok(Args {
         universes,
         sync,
         on_loss,
+        key,
+        encrypt,
     })
+}
+
+/// Parses a 128-bit key written as 32 hex digits.
+fn parse_key(hex: &str) -> anyhow::Result<[u8; 16]> {
+    anyhow::ensure!(hex.len() == 32, "--key needs 32 hex digits");
+    let mut key = [0u8; 16];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)?;
+    }
+    Ok(key)
 }
 
 #[tokio::main]
@@ -98,6 +126,24 @@ async fn main() -> anyhow::Result<()> {
     let args = parse_args()?;
     let cid: Cid = Uuid::new_v4().into();
     let mut source = Source::bind(SourceConfig::new(cid, "x39 sACN")).await?;
+    if let Some(key) = args.key {
+        #[cfg(feature = "secure")]
+        {
+            use sacn::secure::{SecureMode, SecurityKey};
+            let mode = if args.encrypt {
+                SecureMode::Encrypted
+            } else {
+                SecureMode::Authenticated
+            };
+            source.set_security(Some((SecurityKey::new(key), mode)));
+            info!("securing packets ({mode:?})");
+        }
+        #[cfg(not(feature = "secure"))]
+        {
+            let _ = (key, args.encrypt);
+            anyhow::bail!("--key needs the example built with `--features secure`");
+        }
+    }
 
     for &universe in &args.universes {
         let mut config = UniverseConfig::new(universe);

@@ -8,6 +8,7 @@ use tokio::time::Instant as TokioInstant;
 
 use crate::adapters::net::ToMulticastInterfaces;
 use crate::adapters::{AdapterError, MulticastInterface};
+use crate::adapters::{RxSecurity, unseal};
 use crate::packet::{MAX_PACKET_SIZE, Packet};
 use crate::proto::SACN_PORT;
 use crate::receiver::{BasicReceiver as Core, BasicReceiverEvent, ReceiverConfig};
@@ -61,6 +62,8 @@ pub struct BasicReceiver {
     epoch: TokioInstant,
     /// Reusable receive buffer, sized for the largest possible sACN packet.
     recv_buf: Vec<u8>,
+    /// The key secured packets are opened with, if security is enabled.
+    security: RxSecurity,
     /// Events produced by methods that have not yet been handed to the caller.
     pending: VecDeque<BasicReceiverEvent>,
     /// The multicast interfaces currently joined per universe.
@@ -91,9 +94,18 @@ impl BasicReceiver {
             core: Core::new(config),
             epoch: TokioInstant::now(),
             recv_buf: vec![0u8; MAX_PACKET_SIZE],
+            security: Default::default(),
             pending: VecDeque::new(),
             interfaces: HashMap::new(),
         })
+    }
+
+    /// Requires every received packet to be secured with `key` (or, with
+    /// `None`, accepts only standard packets, the default). Packets that do
+    /// not open with the key are dropped. See [`crate::secure`].
+    #[cfg(feature = "secure")]
+    pub fn set_security(&mut self, key: Option<crate::secure::SecurityKey>) {
+        self.security = key;
     }
 
     /// Begins listening for a universe on all usable system interfaces.
@@ -231,7 +243,9 @@ impl BasicReceiver {
                 result = self.socket.recv_from(&mut self.recv_buf) => {
                     if let Ok((len, from)) = result {
                         let now = self.now();
-                        if let Ok(packet) = Packet::parse(&self.recv_buf[..len]) {
+                        if let Some(len) = unseal(&self.security, &mut self.recv_buf, len)
+                            && let Ok(packet) = Packet::parse(&self.recv_buf[..len])
+                        {
                             // The borrowed outcome points into `recv_buf`; convert
                             // its events to owned form straight into `pending`.
                             // The receiving interface is not yet attributed

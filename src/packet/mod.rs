@@ -51,8 +51,8 @@ const ACN_PREAMBLE: [u8; 16] = [
     0x00, 0x10, 0x00, 0x00, b'A', b'S', b'C', b'-', b'E', b'1', b'.', b'1', b'7', 0x00, 0x00, 0x00,
 ];
 
-const VECTOR_ROOT_E131_DATA: u32 = 0x0000_0004;
-const VECTOR_ROOT_E131_EXTENDED: u32 = 0x0000_0008;
+pub(crate) const VECTOR_ROOT_E131_DATA: u32 = 0x0000_0004;
+pub(crate) const VECTOR_ROOT_E131_EXTENDED: u32 = 0x0000_0008;
 
 const VECTOR_E131_DATA_PACKET: u32 = 0x0000_0002;
 const VECTOR_E131_EXTENDED_SYNCHRONIZATION: u32 = 0x0000_0001;
@@ -74,13 +74,13 @@ const SOURCE_NAME_LEN: usize = 64;
 
 /// Offset of the root-layer flags-and-length field (i.e. the end of the
 /// preamble); also the size of the root layer's framing-independent header.
-const ROOT_FLAGS_LENGTH_OFFSET: usize = 16;
+pub(crate) const ROOT_FLAGS_LENGTH_OFFSET: usize = 16;
 /// Offset at which the E1.31 framing layer begins (after the root layer).
 const FRAMING_OFFSET: usize = 38;
 /// Offset at which a data packet's DMP layer begins.
 const DMP_OFFSET: usize = 115;
 /// Size of a data packet with zero DMX slots (the full header).
-const DATA_HEADER_SIZE: usize = 126;
+pub(crate) const DATA_HEADER_SIZE: usize = 126;
 /// Total size of a synchronization packet (it has no variable-length payload).
 const SYNC_PACKET_SIZE: usize = 49;
 /// Offset at which the universe discovery layer begins.
@@ -99,11 +99,17 @@ pub const MAX_SLOTS: usize = 512;
 /// (E1.31 §8).
 pub const MAX_UNIVERSES_PER_PAGE: usize = 512;
 
+/// Size of the footer (nonce and authentication tag) appended to a packet
+/// secured by the experimental `secure` feature.
+pub(crate) const SECURITY_FOOTER_SIZE: usize = 12 + 16;
+
 /// The largest possible serialized sACN packet, in bytes.
 ///
-/// This is a full universe discovery page (the largest PDU). Adapters can use it
-/// to size receive and transmit buffers.
-pub const MAX_PACKET_SIZE: usize = UNIVERSE_DISCOVERY_HEADER_SIZE + MAX_UNIVERSES_PER_PAGE * 2;
+/// This is a full universe discovery page (the largest PDU), plus room for the
+/// footer of a secured packet. Adapters can use it to size receive and transmit
+/// buffers.
+pub const MAX_PACKET_SIZE: usize =
+    UNIVERSE_DISCOVERY_HEADER_SIZE + MAX_UNIVERSES_PER_PAGE * 2 + SECURITY_FOOTER_SIZE;
 
 /// The NULL START code (`0x00`): a [`DataPacket`]'s values are DMX512 levels.
 pub const DMX_NULL_START_CODE: u8 = 0x00;
@@ -116,13 +122,13 @@ pub const PAP_START_CODE: u8 = 0xDD;
 
 /// Builds a PDU flags-and-length field: the standard `0x7` flags (V, H, D) in
 /// the top nibble plus the 12-bit PDU length.
-fn flags_and_length(len: usize) -> u16 {
+pub(crate) fn flags_and_length(len: usize) -> u16 {
     0x7000 | (len as u16 & 0x0fff)
 }
 
 /// Extracts the 12-bit PDU length from a flags-and-length field, ignoring the
 /// flag nibble
-fn pdu_length(flags_length: u16) -> usize {
+pub(crate) fn pdu_length(flags_length: u16) -> usize {
     (flags_length & 0x0fff) as usize
 }
 

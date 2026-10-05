@@ -258,6 +258,16 @@ impl<'d, S: SourceStorage> Source<'d, S> {
         self.core.set_name(self.core_store, name);
     }
 
+    /// Enables or disables experimental packet security. See
+    /// [`Source::set_security`](crate::source::Source::set_security).
+    #[cfg(feature = "secure")]
+    pub fn set_security(
+        &mut self,
+        security: Option<(crate::secure::SecurityKey, crate::secure::SecureMode)>,
+    ) {
+        self.core.set_security(self.core_store, security);
+    }
+
     /// Restarts transmission of a universe's current data promptly, without
     /// changing it. See [`Source::resend`](crate::source::Source::resend).
     pub fn resend(&mut self, universe: Universe) {

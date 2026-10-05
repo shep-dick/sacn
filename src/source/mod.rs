@@ -651,6 +651,9 @@ pub struct SourceResources<S: SourceStorage = HeapStorage> {
     removed: S::Removed,
     /// When the next discovery packet should be sent.
     discovery_next_send: Instant,
+    /// Secures every serialized packet, if security is enabled.
+    #[cfg(feature = "secure")]
+    sealer: Option<crate::secure::Sealer>,
 }
 
 #[cfg(feature = "alloc")]
@@ -772,6 +775,17 @@ impl<S: SourceStorage> Source<S> {
         self.core.set_name(&mut self.store, name);
     }
 
+    /// Enables (`Some`) or disables (`None`) experimental packet security.
+    /// When enabled, every packet the source emits is sealed with the key.
+    /// See [`crate::secure`].
+    #[cfg(feature = "secure")]
+    pub fn set_security(
+        &mut self,
+        security: Option<(crate::secure::SecurityKey, crate::secure::SecureMode)>,
+    ) {
+        self.core.set_security(&mut self.store, security);
+    }
+
     /// Restarts transmission of a universe's current data, re-sending its levels
     /// and per-address priority promptly (as soon as the minimum inter-packet
     /// spacing allows) and beginning a fresh pre-suppression burst, without
@@ -881,6 +895,8 @@ impl<S: SourceStorage> SourceResources<S> {
             packet_len: 0,
             removed,
             discovery_next_send: Instant::EPOCH,
+            #[cfg(feature = "secure")]
+            sealer: None,
         }
     }
 
@@ -1118,6 +1134,18 @@ impl<S: SourceStorage> SourceCore<S> {
         }
     }
 
+    /// Enables or disables experimental packet security.
+    ///
+    /// See [`Source::set_security`].
+    #[cfg(feature = "secure")]
+    pub fn set_security(
+        &self,
+        store: &mut SourceResources<S>,
+        security: Option<(crate::secure::SecurityKey, crate::secure::SecureMode)>,
+    ) {
+        store.sealer = security.map(|(key, mode)| crate::secure::Sealer::new(key, mode));
+    }
+
     /// Restarts transmission of a universe's current data.
     ///
     /// See [`Source::resend`].
@@ -1345,6 +1373,8 @@ impl<S: SourceStorage> SourceCore<S> {
             universes,
             packet_buf,
             packet_len: last_len,
+            #[cfg(feature = "secure")]
+            sealer,
             ..
         } = store;
 
@@ -1400,6 +1430,11 @@ impl<S: SourceStorage> SourceCore<S> {
         };
 
         let n = serialize_into(packet_buf, &packet);
+        #[cfg(feature = "secure")]
+        let n = match sealer {
+            Some(sealer) => sealer.seal(packet_buf, n),
+            None => n,
+        };
         *last_len = n;
         Transmission {
             route: pending.route,
@@ -1437,6 +1472,8 @@ impl<S: SourceStorage> SourceCore<S> {
             universes,
             packet_buf,
             packet_len: last_len,
+            #[cfg(feature = "secure")]
+            sealer,
             ..
         } = store;
 
@@ -1450,6 +1487,11 @@ impl<S: SourceStorage> SourceCore<S> {
         let packet = data_packet(config, state, universe, seq, start_code.get(), false, data);
 
         let n = serialize_into(packet_buf, &packet);
+        #[cfg(feature = "secure")]
+        let n = match sealer {
+            Some(sealer) => sealer.seal(packet_buf, n),
+            None => n,
+        };
         *last_len = n;
         Ok(Transmission {
             route: Route::Universe(universe),

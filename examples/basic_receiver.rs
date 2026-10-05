@@ -2,6 +2,10 @@
 //!
 //! Listens on a universe and renders its DMX levels live in a TUI; press `u` to
 //! switch universes. Run it with `cargo run --example basic_receiver`.
+//!
+//! Pass `--key <32 hex digits>` (with `--features secure`) to accept only
+//! packets secured with that AES-128 key, as sent by the `source` example's
+//! `--key` flag. See `sacn::secure`.
 
 #[path = "common/tui.rs"]
 mod common;
@@ -30,7 +34,23 @@ const INITIAL_UNIVERSE: u16 = 1;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let receiver = BasicReceiver::bind(ReceiverConfig::new()).await?;
+    #[cfg_attr(not(feature = "secure"), allow(unused_mut))]
+    let mut receiver = BasicReceiver::bind(ReceiverConfig::new()).await?;
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (None, _) => {}
+        (Some("--key"), Some(hex)) => {
+            let key = parse_key(&hex)?;
+            #[cfg(feature = "secure")]
+            receiver.set_security(Some(sacn::secure::SecurityKey::new(key)));
+            #[cfg(not(feature = "secure"))]
+            {
+                let _ = key;
+                anyhow::bail!("--key needs the example built with `--features secure`");
+            }
+        }
+        _ => anyhow::bail!("usage: basic_receiver [--key <32 hex digits>]"),
+    }
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let log_buf = init_tui_logging(event_tx.clone());
@@ -77,6 +97,16 @@ async fn main() -> anyhow::Result<()> {
     ratatui::restore();
 
     Ok(())
+}
+
+/// Parses a 128-bit key written as 32 hex digits.
+fn parse_key(hex: &str) -> anyhow::Result<[u8; 16]> {
+    anyhow::ensure!(hex.len() == 32, "--key needs 32 hex digits");
+    let mut key = [0u8; 16];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)?;
+    }
+    Ok(key)
 }
 
 enum AppMode {

@@ -36,6 +36,11 @@ bind_interrupts!(struct Irqs {
 
 const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x38, 0xd8, 0xa5];
 
+/// The shared AES-128 key used when built with `--features secure`. Matches
+/// `--key 000102030405060708090a0b0c0d0e0f` on the tokio examples.
+#[cfg(feature = "secure")]
+const DEMO_KEY: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = Config::default();
@@ -223,6 +228,14 @@ async fn sacn_task(stack: Stack<'static>, button: Input<'static>, mut leds: Leds
     receiver
         .listen(listen_universe)
         .expect("joining universe 1's multicast group");
+
+    #[cfg(feature = "secure")]
+    {
+        use sacn::secure::{SecureMode, SecurityKey};
+        source.set_security(Some((SecurityKey::new(DEMO_KEY), SecureMode::Encrypted)));
+        receiver.set_security(Some(SecurityKey::new(DEMO_KEY)));
+        info!("sACN security enabled: encrypting output, accepting only secured input");
+    }
 
     // Boot into mirror mode: source the merged universe-1 data on universe 2.
     let mut mode = OperatingMode::Mirror;

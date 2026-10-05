@@ -29,3 +29,24 @@ pub mod tokio;
 
 #[cfg(feature = "embassy")]
 pub mod embassy;
+
+/// The key, if any, a receiver adapter opens secured packets with. A unit
+/// placeholder when the `secure` feature is off, so adapters have one code path.
+#[cfg(feature = "secure")]
+pub(crate) type RxSecurity = Option<crate::secure::SecurityKey>;
+#[cfg(not(feature = "secure"))]
+pub(crate) type RxSecurity = ();
+
+/// Prepares a received datagram in `buf[..len]` for parsing, returning the
+/// length of the standard packet to parse or `None` to drop it. With a key set,
+/// only packets that open with that key are kept (opened in place); otherwise
+/// the datagram passes through untouched.
+#[cfg_attr(not(feature = "secure"), allow(clippy::unnecessary_wraps))]
+pub(crate) fn unseal(security: &RxSecurity, buf: &mut [u8], len: usize) -> Option<usize> {
+    #[cfg(feature = "secure")]
+    if let Some(key) = security {
+        return crate::secure::open(key, buf, len);
+    }
+    let _ = (security, buf);
+    Some(len)
+}

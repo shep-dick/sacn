@@ -5,6 +5,10 @@ name = "sacn-embassy-example"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Secure sACN with the demo key in `src/main.rs` (experimental proof of concept).
+secure = ["x39-sacn/secure"]
+
 [dependencies]
 x39-sacn = { path = "../..", default-features = false, features = [
   "embassy",

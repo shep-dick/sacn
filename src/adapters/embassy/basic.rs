@@ -8,6 +8,7 @@ use embassy_net::udp::{UdpMetadata, UdpSocket};
 use embassy_net::{IpAddress, Stack};
 use embassy_time::Instant as EmbassyInstant;
 
+use crate::adapters::{RxSecurity, unseal};
 use crate::packet::{Packet, Payload};
 use crate::proto::{SACN_PORT, ipv4_multicast, ipv6_multicast};
 use crate::receiver::{
@@ -101,6 +102,8 @@ pub struct BasicReceiver<'d, S: BasicReceiverStorage> {
     joined: &'d mut S::Joined,
     /// The persistent datagram buffer received packets are parsed from.
     recv_buf: &'d mut [u8],
+    /// The key secured packets are opened with, if security is enabled.
+    security: RxSecurity,
     /// The instant treated as the core's monotonic epoch.
     epoch: EmbassyInstant,
     /// A data event withheld behind a just-delivered PAP-lost event.
@@ -168,10 +171,19 @@ impl<'d, S: BasicReceiverStorage> BasicReceiver<'d, S> {
             store: core,
             joined,
             recv_buf: recv_buffer.as_mut(),
+            security: Default::default(),
             epoch: EmbassyInstant::now(),
             deferred_data: None,
             last_deadline: None,
         })
+    }
+
+    /// Requires every received packet to be secured with `key` (or, with
+    /// `None`, accepts only standard packets, the default). Packets that do
+    /// not open with the key are dropped. See [`crate::secure`].
+    #[cfg(feature = "secure")]
+    pub fn set_security(&mut self, key: Option<crate::secure::SecurityKey>) {
+        self.security = key;
     }
 
     /// The configuration this receiver was created with.
@@ -357,6 +369,11 @@ impl<'d, S: BasicReceiverStorage> BasicReceiver<'d, S> {
     /// sequence).
     fn handle_packet_event(&mut self, len: usize, from: SocketAddr) -> BasicReceiverEventRef<'_> {
         let now = self.now();
+        // Shadow `len` with the opened length: a deferred data event re-parses
+        // the (now standard) packet left in `recv_buf`.
+        let Some(len) = unseal(&self.security, self.recv_buf, len) else {
+            return BasicReceiverEventRef::NoEvent;
+        };
         let Ok(packet) = Packet::parse(&self.recv_buf[..len]) else {
             return BasicReceiverEventRef::NoEvent;
         };
